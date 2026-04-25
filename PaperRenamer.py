@@ -1,3 +1,5 @@
+#! /opt/homebrew/Caskroom/miniforge/base/envs/ollama/bin/python
+
 import argparse
 import os
 import sys
@@ -12,6 +14,8 @@ from pathlib import Path
 import tempfile
 
 pathProjectRoot = os.path.join(Path.home(), 'projects', 'PaperRenamer')
+pathInbox = os.path.join(pathProjectRoot, 'PaperRenamerInbox')
+pathOutbox = os.path.join(pathProjectRoot, 'PaperRenamerOutbox')
 pathLogs = os.path.join(pathProjectRoot, 'logs')
 
 def fix_pdf_view_preferences(pdf_path):
@@ -191,7 +195,7 @@ def rename_manuscript(filepath, model_to_use=None):
         systemInfo = os.uname() 
         if (systemInfo.sysname == "Darwin" and systemInfo.machine == "arm64") or \
            (systemInfo.sysname == "Linux" and systemInfo.nodename == 'RolandLab'):
-            new_basename = generate_filename_with_gemma(text)
+            new_basename = generate_filename_with_gemma(filepath)
         else:
             new_basename = generate_filename_with_gemini(filepath)
 
@@ -199,45 +203,65 @@ def rename_manuscript(filepath, model_to_use=None):
         new_basename = new_basename.replace(":", "-").replace(";", "-")             # replace any colon or semicolon with a dash to avoid filesystem issues
         new_basename = re.sub(r'[`!@#$%^&*()+=\/?:"<>|]', "", new_basename)         # remove any other special characters that are not allowed in filenames
         new_filename = f"{new_basename}.pdf"
-        directory = os.path.dirname(filepath)
-        path_outbox = os.path.join(pathProjectRoot, 'PaperRenamerOutbox')
-        new_filepath = os.path.join(path_outbox, new_filename)
+        new_filepath = os.path.join(pathOutbox, new_filename)
         
         try:
-            shutil.copy(filepath, new_filepath)
+            shutil.move(filepath, new_filepath)
             # print(f"✅ Success! Renamed to: {new_filename}")
         except Exception as e:
             print(f"❌ Error renaming file: {e}")
         
         return new_filepath
     else:
-        # print("❌ Failed to generate a new filename.")
+        print("❌ Failed to generate a new filename.")
         return -1
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Rename a PDF manuscript.")
-    parser.add_argument("pdf_path", help="Path to the PDF file")
+    parser.add_argument('-p', '--pdfPath', type=str, help="Path to the PDF file")
     parser.add_argument("-m", "--model", choices=['gemma', 'gemini'], help="Model to use for renaming (gemma or gemini)")
     args = parser.parse_args()
     
     # write a log message to a file to indicate the script has started
     os.makedirs(pathLogs, exist_ok=True)  # ensure the logs directory exists
     pathLogFile = os.path.join(pathLogs, 'paper_renamer.log')
-
     with open(pathLogFile, "a") as log_file:
-        
-        # write a timestamp as YYYY-MM-DD HH:MM:SS
-        log_file.write(f"\n\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Starting PaperRenamer script...\n")
+        log_file.write(f"\n\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Starting PaperRenamer script...\n")     # write a timestamp as YYYY-MM-DD HH:MM:SS
         log_file.write(f"Received arguments: {sys.argv}\n")
         
-    target_path = args.pdf_path
-    new_filepath = rename_manuscript(target_path, model_to_use=args.model)
+    # if a pdfPath argument was provided use it, otherwise look for the most recently added PDF in the inbox directory
+    if not args.pdfPath:
+        pdfFileList = [filePdf for filePdf in os.listdir(pathInbox) if filePdf.endswith('.pdf')]
+        if not pdfFileList:
+            print(f"No PDF files found in the inbox directory: {pathInbox}")
+            sys.exit(1)
+        latest_pdf = max(pdfFileList, key=lambda f: os.path.getctime(os.path.join(pathInbox, f)))
+        args.pdfPath = os.path.join(pathInbox, latest_pdf)
+        print(f"No PDF path provided, using the most recently added PDF in the inbox: {args.pdfPath}")
 
+    new_filepath = rename_manuscript(args.pdfPath, model_to_use=args.model)
     if new_filepath and new_filepath != -1:
         fix_pdf_view_preferences(new_filepath)
-
         print(new_filepath)     # return new_filepath as the output of the script for use in scripting
 
+        # display a dialog box to prompt the user to select a directory to move the renamed file to, with the default directory set ~/Dropbox/Research
+        import tkinter as tk
+        from tkinter import filedialog
+        tkRootWindow = tk.Tk()
+        tkRootWindow.withdraw()
+        tkRootWindow.attributes("-topmost", True)  # make the dialog appear on top of other windows
+        default_directory = os.path.join(Path.home(), 'Dropbox', 'Research')
+
+        selected_directory = filedialog.askdirectory(title="Select a directory to move the renamed file to", initialdir=default_directory)
+        if selected_directory:
+            try:
+                shutil.move(new_filepath, os.path.join(selected_directory, os.path.basename(new_filepath)))
+            except Exception as e:
+                print(f"Error moving file: {e}")
+        else:
+            print("No directory selected.")
+
+        tkRootWindow.destroy()
     else:
         print("Error: Failed to rename the manuscript.")
         sys.exit(-1)
