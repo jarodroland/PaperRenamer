@@ -7,11 +7,15 @@ import ollama
 from google import genai
 import shutil
 import re
-import time
+import logging
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import ArrayObject, FloatObject, NameObject
 from pathlib import Path
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
+os.environ['TK_SILENCE_DEPRECATION'] = '1'
+import tkinter as tk
+from tkinter import filedialog
 
 pathProjectRoot = os.path.join(Path.home(), 'projects', 'PaperRenamer')
 pathInbox = os.path.join(pathProjectRoot, 'PaperRenamerInbox')
@@ -32,7 +36,7 @@ def fix_pdf_view_preferences(pdf_path):
     try:
         writer.append_pages_from_reader(reader)                 # try appending pages from the reader to and setting our own view preferences
     except AttributeError as e:
-        print(f"Error occurred while appending pages: {e}, will try removing links and annotations which can cause issues with some PDFs.")
+        logging.error(f"Error occurred while appending pages: {e}, will try removing links and annotations which can cause issues with some PDFs.")
         try:
             writer_temp = PdfWriter(clone_from=reader)          # if append_pages_from_reader fails, remove links and annotations and try again
             writer_temp.remove_links()
@@ -40,11 +44,11 @@ def fix_pdf_view_preferences(pdf_path):
             writer = PdfWriter()
             writer.append_pages_from_reader(writer_temp)
         except Exception as e2:
-            print(f"Error still occurred after removing links and annotations: {e2}, will try cloning the reader which preserves the original structure and metadata.")
+            logging.error(f"Error still occurred after removing links and annotations: {e2}, will try cloning the reader which preserves the original structure and metadata.")
             try:
                 writer = PdfWriter(clone_from=reader)           # if append_pages_from_reader fails, try cloning the reader in which case our new prefernces to fail to be applied but at least we can preserve the original PDF structure and metadata without risking further corruption by trying to modify it
             except Exception as e3:
-                print(f"Error occurred while cloning reader: {e3}, unable to fix PDF view preferences.")
+                logging.error(f"Error occurred while cloning reader: {e3}, unable to fix PDF view preferences.")
                 return
 
     # build a /FitH open-action that fires when the PDF is opened to set the zoom to fit page width, and set the page layout to single page continuous scrolling and hide side panels like the bookmark pane
@@ -68,18 +72,6 @@ def fix_pdf_view_preferences(pdf_path):
     os.replace(tmp_path, new_filepath)
 
 
-def extract_front_page_text(filepath):
-    """Extracts text from the first page of the PDF, where metadata lives."""
-    try:
-        reader = PdfReader(filepath)
-        # We usually only need the first page to find Title, Author, Journal, Year
-        text = reader.pages[0].extract_text() 
-
-        return text
-    except Exception as e:
-        print(f"Error reading PDF: {e}")
-        return None
-
 def generate_filename_with_gemini(pathPdfFile):
     '''Feeds the PDF to Gemini API to generate the filename.'''
 
@@ -88,7 +80,7 @@ def generate_filename_with_gemini(pathPdfFile):
         with open(pathApiKey, "r") as fileApiKey:
             API_KEY = fileApiKey.read().strip()
     except FileNotFoundError:
-        print(f'Error: API key file not found: {pathApiKey}. Please create a file named with your API key.')
+        logging.error(f'Error: API key file not found: {pathApiKey}. Please create a file named with your API key.')
         sys.exit(1)
     
     client = genai.Client(api_key=API_KEY)
@@ -110,7 +102,7 @@ def generate_filename_with_gemini(pathPdfFile):
     - Provide ONLY the requested string, with no additional text, markdown, or explanation.
     """
     
-    # print(f"Analyzing {os.path.basename(pdf_path)} with Gemini...")
+    logging.debug(f"Analyzing {os.path.basename(pdf_path)} with Gemini...")
     
     # upload the PDF to Gemini
     document = client.files.upload(file=pathPdfFile)
@@ -129,16 +121,18 @@ def generate_filename_with_gemini(pathPdfFile):
     
     return new_name
 
+
 def generate_filename_with_gemma(pathPdfFile):
     """Feeds the extracted text to local Gemma to generate the filename."""
 
+    # get text from the first page of the PDF
     try:
         reader = PdfReader(pathPdfFile)
         text = reader.pages[0].extract_text()       # we usually only need the first page to find Title, Author, Journal, Year
     except Exception as e:
-        print(f"Error reading PDF: {e}")
+        logging.error(f"Error reading PDF: {e}")
         return None
-     
+    
     prompt = f"""
     You are a precise data extraction algorithm. Review the following text extracted from the first page of an academic manuscript.
     
@@ -174,24 +168,21 @@ def generate_filename_with_gemma(pathPdfFile):
         return new_name
 
     except Exception as e:
-        print(f"Error communicating with local Gemma: {e}")
+        logging.error(f"Error communicating with local Gemma: {e}")
         return None
 
 
 def rename_manuscript(filepath, model_to_use=None):
     if not filepath.endswith('.pdf'):
-        print(f"Skipping {filepath} - not a PDF.")
+        logging.info(f"Skipping {filepath} - not a PDF.")
         return
-
-    # print(f"Reading: {filepath}...")
-
 
     if model_to_use == 'gemma':
         new_basename = generate_filename_with_gemma(filepath)
     elif model_to_use == 'gemini':
         new_basename = generate_filename_with_gemini(filepath)
     else:
-        # if the computer is an apple silicon use the local Gemma model, otherwise use the Gemini API
+        # if the computer is an apple silicon or my Linux machine in the lab then use the local Gemma model, otherwise use the Gemini API
         systemInfo = os.uname() 
         if (systemInfo.sysname == "Darwin" and systemInfo.machine == "arm64") or \
            (systemInfo.sysname == "Linux" and systemInfo.nodename == 'RolandLab'):
@@ -209,12 +200,13 @@ def rename_manuscript(filepath, model_to_use=None):
             shutil.move(filepath, new_filepath)
             # print(f"✅ Success! Renamed to: {new_filename}")
         except Exception as e:
-            print(f"❌ Error renaming file: {e}")
+            logging.error(f"❌ Error renaming file: {e}")
         
         return new_filepath
     else:
-        print("❌ Failed to generate a new filename.")
+        logging.error("❌ Failed to generate a new filename.")
         return -1
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Rename a PDF manuscript.")
@@ -224,44 +216,52 @@ if __name__ == "__main__":
     
     # write a log message to a file to indicate the script has started
     os.makedirs(pathLogs, exist_ok=True)  # ensure the logs directory exists
-    pathLogFile = os.path.join(pathLogs, 'paper_renamer.log')
+    pathLogFile = os.path.join(pathLogs, 'log-PaperRenamer.log')
+    logging.basicConfig(filename=pathLogFile, level=logging.DEBUG, 
+                    format='%(asctime)s - %(levelname)s - %(message)s')
+
     with open(pathLogFile, "a") as log_file:
-        log_file.write(f"\n\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Starting PaperRenamer script...\n")     # write a timestamp as YYYY-MM-DD HH:MM:SS
-        log_file.write(f"Received arguments: {sys.argv}\n")
+        logging.debug(f'Starting PaperRenamer script with arguments: {sys.argv}')
         
     # if a pdfPath argument was provided use it, otherwise look for the most recently added PDF in the inbox directory
     if not args.pdfPath:
         pdfFileList = [filePdf for filePdf in os.listdir(pathInbox) if filePdf.endswith('.pdf')]
         if not pdfFileList:
-            print(f"No PDF files found in the inbox directory: {pathInbox}")
+            logging.info(f"No PDF files found in the inbox directory: {pathInbox}")
             sys.exit(1)
         latest_pdf = max(pdfFileList, key=lambda f: os.path.getctime(os.path.join(pathInbox, f)))
         args.pdfPath = os.path.join(pathInbox, latest_pdf)
-        print(f"No PDF path provided, using the most recently added PDF in the inbox: {args.pdfPath}")
+        logging.info(f"No PDF path provided, using the most recently added PDF in the inbox: {args.pdfPath}")
 
-    new_filepath = rename_manuscript(args.pdfPath, model_to_use=args.model)
-    if new_filepath and new_filepath != -1:
-        fix_pdf_view_preferences(new_filepath)
-        print(new_filepath)     # return new_filepath as the output of the script for use in scripting
 
-        # display a dialog box to prompt the user to select a directory to move the renamed file to, with the default directory set ~/Dropbox/Research
-        import tkinter as tk
-        from tkinter import filedialog
+    # run the AI model in a background thread while simultaneously prompting user for directory to save in the main thread
+    # N.B., run the askdirectory in the with ThreadPoolExecutor block to ensure we don't proceed until the thread_future_rename is done, otherwise we might end up with a race condition where the rename is not finished by the time we try to move the file to the new directory, which would cause a FileNotFoundError
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        thread_future_rename = executor.submit(rename_manuscript, args.pdfPath, model_to_use=args.model)
+        # selected_directory = get_direcotry_to_save()
+
+        default_directory = os.path.join(Path.home(), 'Dropbox', 'Research')
         tkRootWindow = tk.Tk()
         tkRootWindow.withdraw()
-        tkRootWindow.attributes("-topmost", True)  # make the dialog appear on top of other windows
-        default_directory = os.path.join(Path.home(), 'Dropbox', 'Research')
+        tkRootWindow.attributes('-topmost', True)                                       # make the dialog appear on top of other windows
+        tkRootWindow.lift()
+        selected_directory = filedialog.askdirectory(title="Select a directory to move the renamed file to", initialdir=default_directory, parent=tkRootWindow)
 
-        selected_directory = filedialog.askdirectory(title="Select a directory to move the renamed file to", initialdir=default_directory)
+    tkRootWindow.destroy()
+
+    new_filepath = thread_future_rename.result()
+
+    if new_filepath and new_filepath != -1:
+        fix_pdf_view_preferences(new_filepath)
+        print(new_filepath)     # print new_filepath to stdout as the output of the script for use in scripting
+
         if selected_directory:
             try:
                 shutil.move(new_filepath, os.path.join(selected_directory, os.path.basename(new_filepath)))
             except Exception as e:
-                print(f"Error moving file: {e}")
+                logging.error(f"Error moving file: {e}")
         else:
-            print("No directory selected.")
-
-        tkRootWindow.destroy()
+            logging.info("No directory selected.")
     else:
-        print("Error: Failed to rename the manuscript.")
+        logging.error("Error: Failed to rename the manuscript.")
         sys.exit(-1)
