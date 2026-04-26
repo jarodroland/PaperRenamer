@@ -17,10 +17,20 @@ os.environ['TK_SILENCE_DEPRECATION'] = '1'
 import tkinter as tk
 from tkinter import filedialog
 
+# setup paths
 pathProjectRoot = os.path.join(Path.home(), 'projects', 'PaperRenamer')
 pathInbox = os.path.join(pathProjectRoot, 'PaperRenamerInbox')
 pathOutbox = os.path.join(pathProjectRoot, 'PaperRenamerOutbox')
 pathLogs = os.path.join(pathProjectRoot, 'logs')
+pathLogFile = os.path.join(pathLogs, 'log-PaperRenamer.log')
+
+# setup logging
+os.makedirs(pathLogs, exist_ok=True)  # ensure the logs directory exists
+logging.basicConfig(filename=pathLogFile, level=logging.DEBUG,
+                style='{',
+                format='{asctime} [{levelname}] {name}: {message}')
+logger = logging.getLogger('PaperRenamer')
+
 
 def fix_pdf_view_preferences(pdf_path):
     """
@@ -36,7 +46,7 @@ def fix_pdf_view_preferences(pdf_path):
     try:
         writer.append_pages_from_reader(reader)                 # try appending pages from the reader to and setting our own view preferences
     except AttributeError as e:
-        logging.error(f"Error occurred while appending pages: {e}, will try removing links and annotations which can cause issues with some PDFs.")
+        logger.error(f"Error occurred while appending pages: {e}, will try removing links and annotations which can cause issues with some PDFs.")
         try:
             writer_temp = PdfWriter(clone_from=reader)          # if append_pages_from_reader fails, remove links and annotations and try again
             writer_temp.remove_links()
@@ -44,11 +54,11 @@ def fix_pdf_view_preferences(pdf_path):
             writer = PdfWriter()
             writer.append_pages_from_reader(writer_temp)
         except Exception as e2:
-            logging.error(f"Error still occurred after removing links and annotations: {e2}, will try cloning the reader which preserves the original structure and metadata.")
+            logger.error(f"Error still occurred after removing links and annotations: {e2}, will try cloning the reader which preserves the original structure and metadata.")
             try:
                 writer = PdfWriter(clone_from=reader)           # if append_pages_from_reader fails, try cloning the reader in which case our new prefernces to fail to be applied but at least we can preserve the original PDF structure and metadata without risking further corruption by trying to modify it
             except Exception as e3:
-                logging.error(f"Error occurred while cloning reader: {e3}, unable to fix PDF view preferences.")
+                logger.error(f"Error occurred while cloning reader: {e3}, unable to fix PDF view preferences.")
                 return
 
     # build a /FitH open-action that fires when the PDF is opened to set the zoom to fit page width, and set the page layout to single page continuous scrolling and hide side panels like the bookmark pane
@@ -75,12 +85,14 @@ def fix_pdf_view_preferences(pdf_path):
 def generate_filename_with_gemini(pathPdfFile):
     '''Feeds the PDF to Gemini API to generate the filename.'''
 
+    logger.info(f"Analyzing {os.path.basename(pdf_path)} with Gemini...")
+    
     pathApiKey = os.path.join(Path.home(), '.gemini', 'apikey-default.txt')
     try:
         with open(pathApiKey, "r") as fileApiKey:
             API_KEY = fileApiKey.read().strip()
     except FileNotFoundError:
-        logging.error(f'Error: API key file not found: {pathApiKey}. Please create a file named with your API key.')
+        logger.error(f'Error: API key file not found: {pathApiKey}. Please create a file named with your API key.')
         sys.exit(1)
     
     client = genai.Client(api_key=API_KEY)
@@ -102,8 +114,6 @@ def generate_filename_with_gemini(pathPdfFile):
     - Provide ONLY the requested string, with no additional text, markdown, or explanation.
     """
     
-    logging.debug(f"Analyzing {os.path.basename(pdf_path)} with Gemini...")
-    
     # upload the PDF to Gemini
     document = client.files.upload(file=pathPdfFile)
     
@@ -118,19 +128,22 @@ def generate_filename_with_gemini(pathPdfFile):
     
     # clean up the file from Google's servers to save space
     client.files.delete(name=document.name)
-    
+
+    logger.info(f"Gemini generated filename: {new_name}") 
     return new_name
 
 
 def generate_filename_with_gemma(pathPdfFile):
     """Feeds the extracted text to local Gemma to generate the filename."""
 
+    # logger.info(f"Analyzing {os.path.basename(pdf_path)} with Gemma...")
+    
     # get text from the first page of the PDF
     try:
         reader = PdfReader(pathPdfFile)
         text = reader.pages[0].extract_text()       # we usually only need the first page to find Title, Author, Journal, Year
     except Exception as e:
-        logging.error(f"Error reading PDF: {e}")
+        logger.error(f"Error reading PDF: {e}")
         return None
     
     prompt = f"""
@@ -165,16 +178,17 @@ def generate_filename_with_gemma(pathPdfFile):
         
         new_name = response['message']['content'].strip()
         
+        logger.info(f"Gemma generated filename: {new_name}")
         return new_name
 
     except Exception as e:
-        logging.error(f"Error communicating with local Gemma: {e}")
+        logger.error(f"Error communicating with local Gemma: {e}")
         return None
 
 
 def rename_manuscript(filepath, model_to_use=None):
     if not filepath.endswith('.pdf'):
-        logging.info(f"Skipping {filepath} - not a PDF.")
+        logger.info(f"Skipping {filepath} - not a PDF.")
         return
 
     if model_to_use == 'gemma':
@@ -200,11 +214,11 @@ def rename_manuscript(filepath, model_to_use=None):
             shutil.move(filepath, new_filepath)
             # print(f"✅ Success! Renamed to: {new_filename}")
         except Exception as e:
-            logging.error(f"❌ Error renaming file: {e}")
+            logger.error(f"❌ Error renaming file: {e}")
         
         return new_filepath
     else:
-        logging.error("❌ Failed to generate a new filename.")
+        logger.error("❌ Failed to generate a new filename.")
         return -1
 
 
@@ -213,25 +227,18 @@ if __name__ == "__main__":
     parser.add_argument('-p', '--pdfPath', type=str, help="Path to the PDF file")
     parser.add_argument("-m", "--model", choices=['gemma', 'gemini'], help="Model to use for renaming (gemma or gemini)")
     args = parser.parse_args()
-    
-    # write a log message to a file to indicate the script has started
-    os.makedirs(pathLogs, exist_ok=True)  # ensure the logs directory exists
-    pathLogFile = os.path.join(pathLogs, 'log-PaperRenamer.log')
-    logging.basicConfig(filename=pathLogFile, level=logging.DEBUG, 
-                    format='%(asctime)s - %(levelname)s - %(message)s')
 
-    with open(pathLogFile, "a") as log_file:
-        logging.debug(f'Starting PaperRenamer script with arguments: {sys.argv}')
+    logger.info(f'Starting PaperRenamer script with arguments: {vars(args)}')
         
     # if a pdfPath argument was provided use it, otherwise look for the most recently added PDF in the inbox directory
     if not args.pdfPath:
         pdfFileList = [filePdf for filePdf in os.listdir(pathInbox) if filePdf.endswith('.pdf')]
         if not pdfFileList:
-            logging.info(f"No PDF files found in the inbox directory: {pathInbox}")
+            logger.info(f"No PDF files found in the inbox directory: {pathInbox}")
             sys.exit(1)
         latest_pdf = max(pdfFileList, key=lambda f: os.path.getctime(os.path.join(pathInbox, f)))
         args.pdfPath = os.path.join(pathInbox, latest_pdf)
-        logging.info(f"No PDF path provided, using the most recently added PDF in the inbox: {args.pdfPath}")
+        logger.info(f"No PDF path provided, using the most recently added PDF in the inbox: {args.pdfPath}")
 
 
     # run the AI model in a background thread while simultaneously prompting user for directory to save in the main thread
@@ -259,9 +266,9 @@ if __name__ == "__main__":
             try:
                 shutil.move(new_filepath, os.path.join(selected_directory, os.path.basename(new_filepath)))
             except Exception as e:
-                logging.error(f"Error moving file: {e}")
+                logger.error(f"Error moving file: {e}")
         else:
-            logging.info("No directory selected.")
+            logger.info("No directory selected.")
     else:
-        logging.error("Error: Failed to rename the manuscript.")
+        logger.error("Error: Failed to rename the manuscript.")
         sys.exit(-1)
