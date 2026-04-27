@@ -1,4 +1,6 @@
-#! /opt/homebrew/Caskroom/miniforge/base/envs/ollama/bin/python
+#! /bin/zsh
+"exec" "conda" "run" "-n" "ollama" "python" "$0" "$@"
+#N.B. make sure conda is setup in .zprofile, which is loaded with a non-interactive shell as opposed to .zshrc, otherwise the conda command won't be found when the script is run by launchd
 
 import argparse
 import os
@@ -13,8 +15,7 @@ from pypdf.generic import ArrayObject, FloatObject, NameObject
 from pathlib import Path
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
-os.environ['TK_SILENCE_DEPRECATION'] = '1'
-import tkinter as tk
+import tkinter
 from tkinter import filedialog
 
 # setup paths
@@ -85,7 +86,7 @@ def fix_pdf_view_preferences(pdf_path):
 def generate_filename_with_gemini(pathPdfFile):
     '''Feeds the PDF to Gemini API to generate the filename.'''
 
-    logger.info(f"Analyzing {os.path.basename(pdf_path)} with Gemini...")
+    logger.info(f"Analyzing {os.path.basename(pathPdfFile)} with Gemini...")
     
     pathApiKey = os.path.join(Path.home(), '.gemini', 'apikey-default.txt')
     try:
@@ -186,7 +187,7 @@ def generate_filename_with_gemma(pathPdfFile):
         return None
 
 
-def rename_manuscript(filepath, model_to_use=None):
+def generate_new_filename(filepath, model_to_use=None):
     if not filepath.endswith('.pdf'):
         logger.info(f"Skipping {filepath} - not a PDF.")
         return
@@ -240,15 +241,14 @@ if __name__ == "__main__":
         args.pdfPath = os.path.join(pathInbox, latest_pdf)
         logger.info(f"No PDF path provided, using the most recently added PDF in the inbox: {args.pdfPath}")
 
-
     # run the AI model in a background thread while simultaneously prompting user for directory to save in the main thread
     # N.B., run the askdirectory in the with ThreadPoolExecutor block to ensure we don't proceed until the thread_future_rename is done, otherwise we might end up with a race condition where the rename is not finished by the time we try to move the file to the new directory, which would cause a FileNotFoundError
     with ThreadPoolExecutor(max_workers=1) as executor:
-        thread_future_rename = executor.submit(rename_manuscript, args.pdfPath, model_to_use=args.model)
+        thread_future_rename = executor.submit(generate_new_filename, args.pdfPath, model_to_use=args.model)
         # selected_directory = get_direcotry_to_save()
 
         default_directory = os.path.join(Path.home(), 'Dropbox', 'Research')
-        tkRootWindow = tk.Tk()
+        tkRootWindow = tkinter.Tk()
         tkRootWindow.withdraw()
         tkRootWindow.attributes('-topmost', True)                                       # make the dialog appear on top of other windows
         tkRootWindow.lift()
