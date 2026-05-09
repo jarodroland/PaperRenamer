@@ -1,12 +1,14 @@
 #! /bin/zsh
 "exec" "conda" "run" "-n" "ollama" "python" "$0" "$@"
-#N.B. make sure conda is setup in .zprofile, which is loaded with a non-interactive shell as opposed to .zshrc, otherwise the conda command won't be found when the script is run by launchd
+#N.B. make sure conda is setup in .zprofile, which is loaded by a non-interactive shell (as opposed to .zshrc, that only loads in an interactive shell), 
+# otherwise the conda command won't be found when the script is run by launchd
 
 import argparse
 import os
 import sys
 import ollama
 from google import genai
+import subprocess 
 import shutil
 import re
 import logging
@@ -184,10 +186,33 @@ def generate_filename_with_gemma(pathPdfFile):
 
     except Exception as e:
         logger.error(f"Error communicating with local Gemma: {e}")
+        
+        logger.info("Performing a check to see if Ollama is running, since the error might be due to Ollama not running or the model not being loaded rather than an issue with the prompt or the way we're calling the model.")
+        check_running = subprocess.run(["pgrep", "-x", "Ollama"], capture_output=True, text=True)
+        if check_running.returncode == 0:
+            logger.info('Ollama is running, so the error is likely with the model or the prompt.')
+        else:
+            logger.error('Ollama does not appear to be running. Will attempt to launch Ollama and retry filename generation.')
+            
+            # launch ollama and if succesfull then call this function again to retry the filename generation
+            processOllamaServe = subprocess.Popen(['ollama', 'serve'], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # result = subprocess.run(['ollama serve'], check=True)
+            if processOllamaServe.poll() is None:     # check if the process is still running, which would indicate it was launched successfully
+                logger.info('Successfully launched Ollama, retrying filename generation...')
+                return generate_filename_with_gemma(pathPdfFile)
+            else:
+                logger.error('Failed to launch Ollama with subprocess.Popen().')
+                return None
+
         return None
 
 
 def generate_new_filename(filepath, model_to_use=None):
+    """ Use some basic logic to determine which model to use (local Gemma vs cloud Gemini), 
+        then call the appropriate function to generate the new filename, 
+        and finally rename the file with the new name. 
+    """
+    
     if not filepath.endswith('.pdf'):
         logger.info(f"Skipping {filepath} - not a PDF.")
         return
@@ -197,11 +222,13 @@ def generate_new_filename(filepath, model_to_use=None):
     elif model_to_use == 'gemini':
         new_basename = generate_filename_with_gemini(filepath)
     else:
-        # if the computer is an apple silicon or my Linux machine in the lab then use the local Gemma model, otherwise use the Gemini API
+        # if the computer is an apple silicon or my Linux lab machine then use the local Gemma model, otherwise use the Gemini API
         systemInfo = os.uname() 
         if (systemInfo.sysname == "Darwin" and systemInfo.machine == "arm64") or \
            (systemInfo.sysname == "Linux" and systemInfo.nodename == 'RolandLab'):
             new_basename = generate_filename_with_gemma(filepath)
+            if not new_basename:
+                new_basename = generate_filename_with_gemini(filepath)     # if the local Gemma model fails for any reason, fall back to using the Gemini
         else:
             new_basename = generate_filename_with_gemini(filepath)
 
@@ -249,10 +276,19 @@ if __name__ == "__main__":
 
         default_directory = os.path.join(Path.home(), 'Dropbox', 'Research')
         tkRootWindow = tkinter.Tk()
+        
+        # center the root window at the top of screen (the filedialog will be centered on the root window, so this will center the filedialog)
+        screen_width = tkRootWindow.winfo_screenwidth()
+        screen_height = tkRootWindow.winfo_screenheight()
+        window_width = 200
+        window_height = 200
+        x_cordinate = int((screen_width/2) - (window_width/2))
+        tkRootWindow.geometry(f'{window_width}x{window_height}+{x_cordinate}+0')
+        
+        tkRootWindow.attributes('-topmost', True)           # make the dialog appear on top of other windows
+        tkRootWindow.lift()                                 # lift the root window to the top of the window stack
         tkRootWindow.withdraw()
-        tkRootWindow.attributes('-topmost', True)                                       # make the dialog appear on top of other windows
-        tkRootWindow.lift()
-        selected_directory = filedialog.askdirectory(title="Select a directory to move the renamed file to", initialdir=default_directory, parent=tkRootWindow)
+        selected_directory = filedialog.askdirectory(title='Select a directory in which to move the renamed file', initialdir=default_directory, parent=tkRootWindow)
 
     tkRootWindow.destroy()
 
