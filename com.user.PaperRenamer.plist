@@ -13,7 +13,7 @@
 	</array>
  	<key>WatchPaths</key>
 	<array>
-		<string>/Users/jarod/projects/PaperRenamer/PaperRenamerInbox</string>
+		<string>${HOME}/projects/PaperRenamer/PaperRenamerInbox</string>
 	</array>
 	<key>StandardErrorPath</key>
 	<string>/tmp/PaperRenamer.err</string>
